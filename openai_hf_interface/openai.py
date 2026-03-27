@@ -2,7 +2,7 @@ import asyncio
 import json
 from openai import AsyncOpenAI
 import os
-import time
+import random
 import numpy as np
 import google.auth
 import google.auth.transport.requests
@@ -116,6 +116,46 @@ def choose_provider(provider):
             aclient = AsyncOpenAI()
 
 
+def _extract_retry_after_seconds(exc):
+    response = getattr(exc, 'response', None)
+    headers = getattr(response, 'headers', None)
+    if headers is None:
+        return None
+
+    retry_after = headers.get('retry-after')
+    if retry_after is None:
+        return None
+
+    try:
+        return max(0.0, float(retry_after))
+    except Exception:
+        return None
+
+
+def _is_rate_limited_error(exc):
+    status_code = getattr(exc, 'status_code', None)
+    if status_code == 429:
+        return True
+
+    response = getattr(exc, 'response', None)
+    if getattr(response, 'status_code', None) == 429:
+        return True
+
+    text = str(exc).lower()
+    return '429' in text or 'too many requests' in text or 'rate limit' in text
+
+
+def _retry_wait_seconds(exc, retry_count):
+    retry_after = _extract_retry_after_seconds(exc)
+    if retry_after is not None:
+        return min(120.0, retry_after)
+
+    wait_seconds = min(60.0, (2 ** min(retry_count, 6)) + random.uniform(0.0, 1.0))
+    if _is_rate_limited_error(exc):
+        wait_seconds = min(120.0, wait_seconds * 1.5)
+    return wait_seconds
+
+
 async def prompt_openai_single(model, prompt, n, **kwargs):
     global client_provider
     ct = 0
@@ -130,9 +170,12 @@ async def prompt_openai_single(model, prompt, n, **kwargs):
                 return [x.text for x in response.choices]
         except Exception as e:
             ct += 1
+            if ct > n_retries:
+                raise
+            wait_seconds = _retry_wait_seconds(e, ct)
             print(f'Exception occured: {e}')
-            print(f'Waiting for {10 * ct} seconds')
-            time.sleep(5 * ct)
+            print(f'Retrying ({ct}/{n_retries}) after {wait_seconds:.2f} seconds')
+            await asyncio.sleep(wait_seconds)
 
 
 async def prompt_openai_chat_single(model, messages, n, **kwargs):
@@ -149,9 +192,12 @@ async def prompt_openai_chat_single(model, messages, n, **kwargs):
                 return [x.message.content for x in response.choices]
         except Exception as e: 
             ct += 1
+            if ct > n_retries:
+                raise
+            wait_seconds = _retry_wait_seconds(e, ct)
             print(f'Exception occured: {e}')
-            print(f'Waiting for {10 * ct} seconds')
-            await asyncio.sleep(10 * ct)
+            print(f'Retrying ({ct}/{n_retries}) after {wait_seconds:.2f} seconds')
+            await asyncio.sleep(wait_seconds)
 
 
 class OpenAI_LLM(LLMBase):
@@ -227,8 +273,16 @@ class OpenAI_LLM(LLMBase):
 
     async def _prompt_batcher(self, prompts, **kwargs):
         all_res = []
+        max_concurrency = int(kwargs.pop('max_concurrency', 16))
+        max_concurrency = max(1, max_concurrency)
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def _bounded_get_prompt_res(prompt):
+            async with semaphore:
+                return await self._get_prompt_res(prompt, **kwargs)
+
         for ind in range(0, len(prompts), 1000): # Batch 1000 requests
-            res = await asyncio.gather(*[self._get_prompt_res(prompt, **kwargs) for prompt in prompts[ind:ind+1000]])
+            res = await asyncio.gather(*[_bounded_get_prompt_res(prompt) for prompt in prompts[ind:ind+1000]])
             all_res += res
         return all_res
 
