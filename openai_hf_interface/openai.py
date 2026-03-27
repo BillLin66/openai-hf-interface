@@ -148,11 +148,11 @@ def _is_rate_limited_error(exc):
 def _retry_wait_seconds(exc, retry_count):
     retry_after = _extract_retry_after_seconds(exc)
     if retry_after is not None:
-        return min(120.0, retry_after)
+        return min(30.0, retry_after)
 
-    wait_seconds = min(60.0, (2 ** min(retry_count, 6)) + random.uniform(0.0, 1.0))
+    wait_seconds = min(10.0, (1.5 ** min(retry_count, 6)) + random.uniform(0.0, 1.0))
     if _is_rate_limited_error(exc):
-        wait_seconds = min(120.0, wait_seconds * 1.5)
+        wait_seconds = min(30.0, wait_seconds * 1.5)
     return wait_seconds
 
 
@@ -273,7 +273,7 @@ class OpenAI_LLM(LLMBase):
 
     async def _prompt_batcher(self, prompts, **kwargs):
         all_res = []
-        max_concurrency = int(kwargs.pop('max_concurrency', 16))
+        max_concurrency = int(kwargs.pop('max_concurrency', 2))
         max_concurrency = max(1, max_concurrency)
         semaphore = asyncio.Semaphore(max_concurrency)
 
