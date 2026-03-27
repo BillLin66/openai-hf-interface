@@ -4,8 +4,39 @@ from openai import AsyncOpenAI
 import os
 import time
 import numpy as np
+import google.auth
+import google.auth.transport.requests
 
 from .base import LLMBase
+
+
+class OpenAICredentialsRefresher:
+    def __init__(self, **kwargs):
+        self.client = AsyncOpenAI(**kwargs, api_key='PLACEHOLDER')
+        self.creds, _ = google.auth.default(
+            scopes=['https://www.googleapis.com/auth/cloud-platform']
+        )
+        self.request = google.auth.transport.requests.Request()
+
+    def __getattr__(self, name):
+        if not self.creds.valid or not self.creds.token:
+            try:
+                self.creds.refresh(self.request)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Unable to refresh auth: credential refresh call failed. "
+                    "Check your Google Cloud credentials configuration and network connectivity."
+                ) from exc
+
+            if not self.creds.valid or not self.creds.token:
+                raise RuntimeError(
+                    "Unable to refresh auth: credentials remain invalid after refresh "
+                    f"(valid={self.creds.valid}, token_present={bool(self.creds.token)}). "
+                    "Verify your Google Cloud credentials and permissions."
+                )
+
+        self.client.api_key = self.creds.token
+        return getattr(self.client, name)
 
 # Set openai_api_key if there's secrets.json file
 
@@ -30,7 +61,16 @@ except Exception as e:
                 aclient = AsyncOpenAI(api_key=data['openrouter_api_key'], base_url='https://openrouter.ai/api/v1')
                 client_provider = 'openrouter'
         except:
-            aclient = AsyncOpenAI()
+            try:
+                dir_path = os.path.dirname(os.path.realpath(__file__))
+                with open(os.path.join(dir_path, '..', 'secrets.json')) as f:
+                    data = json.load(f)
+                    aclient = OpenAICredentialsRefresher(
+                        base_url=f"https://aiplatform.googleapis.com/v1/projects/{data['vertex_project_id']}/locations/{data['vertex_location']}/endpoints/openapi"
+                    )
+                    client_provider = 'vertex'
+            except:
+                aclient = AsyncOpenAI()
 
 
 def choose_provider(provider):
@@ -43,6 +83,17 @@ def choose_provider(provider):
                 data = json.load(f)
                 aclient = AsyncOpenAI(api_key=data['ai_studio_key'], base_url='https://generativelanguage.googleapis.com/v1beta/openai/')
                 client_provider = 'ai_studio'
+        except:
+            aclient = AsyncOpenAI()
+    elif provider == 'vertex':
+        try:
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            with open(os.path.join(dir_path, '..', 'secrets.json')) as f:
+                data = json.load(f)
+                aclient = OpenAICredentialsRefresher(
+                    base_url=f"https://aiplatform.googleapis.com/v1/projects/{data['vertex_project_id']}/locations/{data['vertex_location']}/endpoints/openapi"
+                )
+                client_provider = 'vertex'
         except:
             aclient = AsyncOpenAI()
     elif provider == 'openrouter':
@@ -71,7 +122,7 @@ async def prompt_openai_single(model, prompt, n, **kwargs):
     n_retries = 30
     while ct <= n_retries:
         try:
-            if client_provider == 'openrouter' or client_provider == 'ai_studio':
+            if client_provider == 'openrouter' or client_provider == 'ai_studio' or client_provider == 'vertex':
                 responses = await asyncio.gather(*[aclient.completions.create(model=model, prompt=prompt, **kwargs) for _ in range(n)])
                 return [x.text for response in responses for x in response.choices]
             else:
@@ -90,7 +141,7 @@ async def prompt_openai_chat_single(model, messages, n, **kwargs):
     n_retries = 10
     while ct <= n_retries:
         try:
-            if client_provider == 'openrouter' or client_provider == 'ai_studio':
+            if client_provider == 'openrouter' or client_provider == 'ai_studio' or client_provider == 'vertex':
                 responses = await asyncio.gather(*[aclient.chat.completions.create(model=model, messages=messages, **kwargs) for _ in range(n)])
                 return [x.message.content for response in responses for x in response.choices]
             else:
@@ -130,7 +181,7 @@ class OpenAI_LLM(LLMBase):
         # if 'request_timeout' not in kwargs:
         #     kwargs['request_timeout'] = 180 if self.model.startswith('gpt-4') else 30
 
-        if client_provider == 'ai_studio' and 'seed' in kwargs:
+        if (client_provider == 'ai_studio' or client_provider == 'vertex') and 'seed' in kwargs:
             del kwargs['seed']
 
         kwargs = {**kwargs, **self.default_kwargs}
