@@ -4,14 +4,21 @@ from openai import AsyncOpenAI
 import os
 import time
 import numpy as np
-import google.auth
-import google.auth.transport.requests
 
 from .base import LLMBase
 
 
 class OpenAICredentialsRefresher:
     def __init__(self, **kwargs):
+        try:
+            import google.auth
+            import google.auth.transport.requests
+        except ImportError as exc:
+            raise RuntimeError(
+                "Vertex AI requires the `google-auth` package. "
+                "Install the Google auth dependencies before using the vertex provider."
+            ) from exc
+        
         self.client = AsyncOpenAI(**kwargs, api_key='PLACEHOLDER')
         self.creds, _ = google.auth.default(
             scopes=['https://www.googleapis.com/auth/cloud-platform']
